@@ -15,7 +15,7 @@ app = FastAPI(
 # Initialize a lightweight session globally to avoid reloading the model on every request.
 # 'u2net_fast' is specifically designed for systems with constrained hardware/RAM.
 try:
-    lightweight_session = new_session("u2net_fast")
+    lightweight_session = new_session("u2netp")  # Use 'u2netp' for a smaller model footprint
 except Exception as e:
     print(f"Error initializing rembg session: {str(e)}")
     lightweight_session = None
