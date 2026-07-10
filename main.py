@@ -1,40 +1,68 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
-from rembg import remove
-from PIL import Image
 import io
 import os
+import gc
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
+from rembg import remove, new_session
+from PIL import Image
 
-app = FastAPI(title="AI Background Remover API")
+app = FastAPI(
+    title="AI Background Remover API",
+    description="A lightweight and production-ready API for background removal optimized for low-RAM environments.",
+    version="1.0.0"
+)
 
-@app.post("/remove-bg")
+# Initialize a lightweight session globally to avoid reloading the model on every request.
+# 'u2net_fast' is specifically designed for systems with constrained hardware/RAM.
+try:
+    lightweight_session = new_session("u2net_fast")
+except Exception as e:
+    print(f"Error initializing rembg session: {str(e)}")
+    lightweight_session = None
+
+@app.post(
+    "/remove-bg",
+    summary="Remove image background",
+    description="Upload an image file to process and extract the foreground object with a transparent background."
+)
 async def remove_background(image: UploadFile = File(...)):
-    # 1. Validasi apakah file yang diunggah adalah gambar
+    # Validate file type extension/mime-type
     if not image.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File yang diunggah harus berupa gambar!")
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid file type. The uploaded file must be an image."
+        )
 
     try:
-        # 2. Baca file gambar yang dikirim dari client ke dalam memori
-        request_object_content = await image.read()
-        input_image = Image.open(io.BytesIO(request_object_content))
+        # Read file contents into memory safely
+        file_content = await image.read()
+        input_image = Image.open(io.BytesIO(file_content))
 
-        # 3. Proses penghapusan background menggunakan library rembg
-        # Fungsi remove() ini otomatis memisahkan objek utama dari background-nya
-        output_image = remove(input_image)
+        # ASSISTED DOWNSCALING: Check if image dimensions exceed memory limits.
+        # Restricting the maximum edge length to 1500 pixels scales down large compressed 
+        # images (e.g., 4MB+ JPGs) so they don't blow up the RAM matrix.
+        max_dimension = 1500
+        if max(input_image.size) > max_dimension:
+            input_image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
 
-        # 4. Simpan gambar hasil (format PNG transparan) ke dalam bytes buffer di memori
-        img_byte_arr = io.BytesIO()
-        output_image.save(img_byte_arr, format="PNG")
-        img_byte_arr.seek(0)
+        # Process the image using our pre-loaded lightweight session
+        output_image = remove(input_image, session=lightweight_session)
 
-        # 5. Langsung kirim balik file gambar fisik .png ke client
-        return StreamingResponse(img_byte_arr, media_type="image/png")
+        # Save the result into a byte stream as PNG to preserve transparency (alpha channel)
+        image_byte_array = io.BytesIO()
+        output_image.save(image_byte_array, format="PNG")
+        image_byte_array.seek(0)
+
+        # Explicit garbage collection to force-release system memory immediately
+        del input_image
+        del output_image
+        gc.collect()
+
+        return StreamingResponse(image_byte_array, media_type="image/png")
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Gagal memproses gambar: {str(e)}")
-
-if __name__ == "__main__":
-    import uvicorn
-    # Railway membutuhkan aplikasi berjalan di port yang disediakan oleh sistem enviroment
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+        # Catch unexpected errors gracefully and prevent server crashes
+        raise HTTPException(
+            status_code=500, 
+            detail=f"An error occurred while processing the image: {str(e)}"
+        )
